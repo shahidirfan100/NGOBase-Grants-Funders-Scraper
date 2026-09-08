@@ -1,0 +1,86 @@
+{
+    "title": "NGOBase Funding Agencies Scraper",
+    "description": "Collect public funding agency and grantmaker listings from NGOBase using agency name, country, state, or agency type filters.",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "keyword": {
+            "title": "Agency name keyword",
+            "type": "string",
+            "description": "Search funding agency names and public listing text.",
+            "editor": "textfield",
+            "prefill": "UNICEF"
+        },
+        "country": {
+            "title": "Country",
+            "type": "string",
+            "description": "Country name or NGOBase country code. Used when no keyword is supplied.",
+            "editor": "textfield"
+        },
+        "state": {
+            "title": "State or province",
+            "type": "string",
+            "description": "Optional state or province name/code. A country is required when using this field.",
+            "editor": "textfield"
+        },
+        "agencyType": {
+            "title": "Agency type",
+            "type": "string",
+            "description": "Funding agency type, such as Government Agency or UN Agency.",
+            "editor": "select",
+            "enum": ["cf", "em", "ff", "ga", "ii", "ias", "ida", "ot", "pbf", "un"],
+            "enumTitles": [
+                "Corporate Foundation / CSR",
+                "Embassy / Diplomatic Mission",
+                "Family Foundation",
+                "Government Agency",
+                "Impact Investment Firm",
+                "Industry Association",
+                "International Development Aid Agency",
+                "Other",
+                "Private / Public Foundation",
+                "UN Agency"
+            ]
+        },
+
+        "sorting": {
+            "title": "Sorting",
+            "type": "string",
+            "description": "Result order.",
+            "editor": "select",
+            "enum": ["default", "name_a_to_z", "type_name"],
+            "enumTitles": ["Default (by popularity)", "Agency name A to Z", "Agency type"],
+            "default": "default",
+            "prefill": "default"
+        },
+        "resultsWanted": {
+            "title": "Results wanted",
+            "type": "integer",
+            "description": "Maximum number of unique funding agency records to save.",
+            "minimum": 1,
+            "default": 20,
+            "prefill": 20,
+            "editor": "number"
+        },
+        "maxPages": {
+            "title": "Maximum pages",
+            "type": "integer",
+            "description": "Maximum listing pages to request for the selected funding agency target.",
+            "minimum": 1,
+            "default": 10,
+            "prefill": 3,
+            "editor": "number"
+        },
+        "proxyConfiguration": {
+            "title": "Proxy configuration",
+            "type": "object",
+            "description": "Optional Apify Proxy configuration for reliable runs.",
+            "editor": "proxy",
+            "default": {
+                "useApifyProxy": true
+            }
+        }
+    },
+    "required": [],
+    "additionalProperties": false
+}

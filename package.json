@@ -1,0 +1,29 @@
+{
+    "name": "ngobase-funding-agencies-scraper",
+    "version": "1.0",
+    "description": "Collect structured funding agency and grantmaker listings from NGOBase.",
+    "type": "module",
+    "dependencies": {
+        "apify": "^3.7.2",
+        "cheerio": "^1.2.0",
+        "impit": "^0.14.3",
+        "patchright": "^1.60.0"
+    },
+    "devDependencies": {
+        "@apify/eslint-config": "^2.0.0",
+        "eslint": "^9.29.0",
+        "eslint-config-prettier": "^10.1.5",
+        "prettier": "^3.5.3",
+        "vitest": "^4.1.0"
+    },
+    "scripts": {
+        "start": "node src/main.js",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "lint": "eslint",
+        "lint:fix": "eslint --fix",
+        "test": "vitest run"
+    },
+    "author": "Shahid Irfan",
+    "license": "ISC"
+}

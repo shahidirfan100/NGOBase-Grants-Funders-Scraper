@@ -1,0 +1,11 @@
+{
+    "actorOutputSchemaVersion": 1,
+    "title": "NGOBase funding agency output",
+    "properties": {
+        "overview": {
+            "type": "string",
+            "title": "Funding agency listings",
+            "template": "{{links.apiDefaultDatasetUrl}}/items?view=overview"
+        }
+    }
+}

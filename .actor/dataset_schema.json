@@ -1,0 +1,117 @@
+{
+    "actorSpecification": 1,
+    "title": "NGOBase funding agency dataset",
+    "description": "Structured funding agency and grantmaker listings collected from NGOBase.",
+    "fields": {
+        "type": "object",
+        "properties": {
+            "id": {
+                "title": "Agency ID",
+                "type": "string",
+                "description": "NGOBase funding agency identifier when available."
+            },
+            "name": {
+                "title": "Agency name",
+                "type": "string",
+                "description": "Public funding agency or grantmaker name."
+            },
+            "url": {
+                "title": "Profile URL",
+                "type": "string",
+                "description": "NGOBase funding agency profile URL."
+            },
+            "logo": {
+                "title": "Logo URL",
+                "type": "string",
+                "description": "Public funding agency logo URL when available."
+            },
+            "website": {
+                "title": "Website",
+                "type": "string",
+                "description": "Agency website when published."
+            },
+            "facebook": {
+                "title": "Facebook URL",
+                "type": "string",
+                "description": "Agency Facebook page when published."
+            },
+            "linkedin": {
+                "title": "LinkedIn URL",
+                "type": "string",
+                "description": "Agency LinkedIn page when published."
+            },
+            "country": {
+                "title": "Country",
+                "type": "string",
+                "description": "Agency country."
+            },
+            "agency_type": {
+                "title": "Agency type",
+                "type": "string",
+                "description": "Funding agency classification when published."
+            },
+
+            "source_url": {
+                "title": "Source listing URL",
+                "type": "string",
+                "description": "Listing page from which the record was collected."
+            },
+            "source": {
+                "title": "Source",
+                "type": "string",
+                "description": "Source website."
+            },
+            "scraped_at": {
+                "title": "Scraped at",
+                "type": "string",
+                "description": "UTC timestamp for the collection run."
+            }
+        },
+        "additionalProperties": false
+    },
+    "views": {
+        "overview": {
+            "title": "Funding agency listings",
+            "transformation": {
+                "fields": ["name", "agency_type", "country", "website", "url", "linkedin", "facebook"]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "name": {
+                        "label": "Name",
+                        "format": "text"
+                    },
+
+                    "agency_type": {
+                        "label": "Agency type",
+                        "format": "text"
+                    },
+                    "country": {
+                        "label": "Country",
+                        "format": "text"
+                    },
+
+                    "website": {
+                        "label": "Website",
+                        "format": "link"
+                    },
+
+                    "url": {
+                        "label": "Profile",
+                        "format": "link"
+                    },
+
+                    "linkedin": {
+                        "label": "LinkedIn",
+                        "format": "link"
+                    },
+                    "facebook": {
+                        "label": "Facebook",
+                        "format": "link"
+                    }
+                }
+            }
+        }
+    }
+}
