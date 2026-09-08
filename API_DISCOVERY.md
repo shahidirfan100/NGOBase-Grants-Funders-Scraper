@@ -45,10 +45,10 @@ The Actor does not request agency detail pages. The detail HTML adds limited ext
 
 ## Request and session behavior
 
-- The Actor warms the selected directory or keyword page in one Patchright real Chrome persistent context.
-- Browser cookies are transferred into the shared `impit` request client for the fast direct-request path.
-- If the direct request receives a confirmed access challenge, the already-warmed browser session is reused instead of launching another browser.
-- Filter resolution keeps the warmup session, CSRF token, referer, and cookies together.
+- The Actor uses `impit` for the fast direct-request path and does not start Chrome during normal runs.
+- If a direct listing or filter request receives a confirmed access challenge, Patchright real Chrome is started lazily as a fallback.
+- Cookies collected by `impit` are transferred into the fallback browser context, and browser cookies are handed back to subsequent requests.
+- Filter resolution keeps the CSRF token, referer, and shared cookie jar together.
 - Apify Proxy can be supplied through `proxyConfiguration`; the browser and direct requests use the same selected proxy URL.
 - The Actor retries temporary network errors and HTTP 429 or 5xx responses with bounded delays.
 - No authorization token, API key, or cookie value is hardcoded in the Actor.

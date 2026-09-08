@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { extractNextPage, extractSortBase, parseAgencyListings } from '../src/main.js';
+import {
+    extractNextPage,
+    extractSortBase,
+    hasAgencyContent,
+    isChallengeHtml,
+    parseAgencyListings,
+} from '../src/main.js';
 
 const listingUrl = 'https://ngobase.org/funding-agencies';
 const html = `
@@ -57,5 +63,24 @@ describe('NGOBase funding agency parser', () => {
 
     it('extracts the next page URL', () => {
         expect(extractNextPage(html, listingUrl)).toBe(`${listingUrl}?page=2`);
+    });
+
+    it('does not reject valid listing HTML containing challenge-like scripts', () => {
+        const validListing = `${html}<script src="/cdn-cgi/challenge-platform/script.js"></script>`;
+
+        expect(hasAgencyContent(validListing)).toBe(true);
+        expect(isChallengeHtml(validListing)).toBe(false);
+    });
+
+    it('recognizes a challenge document without agency markup', () => {
+        const challenge = `
+            <html>
+                <head><title>Just a moment...</title></head>
+                <body><script src="/cdn-cgi/challenge-platform/script.js"></script></body>
+            </html>
+        `;
+
+        expect(hasAgencyContent(challenge)).toBe(false);
+        expect(isChallengeHtml(challenge)).toBe(true);
     });
 });

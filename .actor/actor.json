@@ -4,7 +4,7 @@
     "version": "1.0",
     "buildTag": "latest",
     "minMemoryMbytes": 512,
-    "maxMemoryMbytes": 1024,
+    "maxMemoryMbytes": 2048,
     "dockerfile": "../Dockerfile",
     "readme": "../README.md",
     "input": "./input_schema.json",

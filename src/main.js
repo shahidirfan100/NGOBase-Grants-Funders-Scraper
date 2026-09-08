@@ -313,9 +313,14 @@ async function fetchHtml(client, url, cookieJar, referer, label) {
         cookieJar,
         label,
     );
+    const html = await readHtmlResponse(response, url, label);
+
+    if (isChallengeHtml(html)) {
+        throw new Error(`${label}: NGOBase access challenge for ${url}`);
+    }
 
     return {
-        html: await readHtmlResponse(response, url, label),
+        html,
         url: response.url || url,
     };
 }
@@ -338,8 +343,13 @@ async function postForm(client, url, values, cookieJar, referer, label) {
         label,
     );
 
+    const html = await readHtmlResponse(response, url, label);
+    if (isChallengeHtml(html)) {
+        throw new Error(`${label}: NGOBase access challenge for ${url}`);
+    }
+
     return {
-        html: await readHtmlResponse(response, url, label),
+        html,
         url: response.url || url,
     };
 }
@@ -401,21 +411,47 @@ function browserResponse(status, url, headers, body) {
     };
 }
 
-function isChallengeHtml(html) {
-    return /just a moment|checking your browser|challenge-platform|cf-chl|access denied/i.test(html);
+export function hasAgencyContent(html) {
+    return (
+        /<(?:a|form)\b[^>]+(?:href|action)=["'][^"']*\/agency\//i.test(html) ||
+        /class=["'][^"']*\blisting_logo_img\b/i.test(html) ||
+        /id=["'](?:agency_country|agency_type)["']/i.test(html) ||
+        /name=["']_token["']/i.test(html)
+    );
 }
 
-function hasAgencyContent(html) {
-    return /\/agency\/|id=["']agency_country|name=["']_token/i.test(html);
+export function isChallengeHtml(html) {
+    if (!html || hasAgencyContent(html)) return false;
+
+    return (
+        /<title[^>]*>\s*(?:just a moment|checking your browser|access denied|attention required)/i.test(html) ||
+        /id=["'][^"']*challenge[^"']*|cf-chl-|challenge-platform|checking your browser before accessing|enable javascript and cookies|access denied/i.test(
+            html,
+        )
+    );
 }
 
-async function createBrowserClient(proxyUrl) {
+async function createBrowserClient(proxyUrl, cookieJar) {
     const context = await chromium.launchPersistentContext(join(tmpdir(), `ngobase-profile-${process.pid}`), {
         channel: 'chrome',
         headless: false,
         noViewport: true,
         ...(proxyUrl && { proxy: toPlaywrightProxy(proxyUrl) }),
     });
+
+    const setCookies = async () => {
+        if (!cookieJar?.size) return;
+        await context.addCookies(
+            [...cookieJar.entries()].map(([name, value]) => ({
+                name,
+                value,
+                domain: '.ngobase.org',
+                path: '/',
+            })),
+        );
+    };
+
+    await setCookies();
     const page = await context.newPage();
 
     const client = {
@@ -478,6 +514,7 @@ async function createBrowserClient(proxyUrl) {
     return {
         client,
         getCookies: client.getCookies,
+        setCookies,
         close: async () => {
             await page.close();
             await context.close();
@@ -571,41 +608,39 @@ async function run() {
         proxyConfiguration && Actor.isAtHome() ? await Actor.createProxyConfiguration(proxyConfiguration) : undefined;
     const proxyUrl = await getProxyUrl(proxyConfiguration, proxyConfigurationObject);
     const cookieJar = new Map();
-    const warmupUrl = input.keyword ? buildKeywordUrl(input.keyword) : BASE_URL;
-
-    log.info(`Starting Patchright session warm-up | target=${new URL(warmupUrl).pathname}`);
-    browserSession = await createBrowserClient(proxyUrl);
-    try {
-        const warmupResponse = await browserSession.client.fetch(warmupUrl, {
-            method: 'GET',
-            headers: new Headers({ accept: 'text/html,application/xhtml+xml' }),
-            timeout: REQUEST_TIMEOUT_MS,
-        });
-        seedCookieJar(cookieJar, await browserSession.getCookies());
-        if (!warmupResponse.ok) {
-            log.warning(`Patchright warm-up returned HTTP ${warmupResponse.status}; continuing with shared session.`);
-        } else {
-            log.info(`Patchright warm-up completed | cookies=${cookieJar.size}`);
-        }
-    } catch (error) {
-        seedCookieJar(cookieJar, await browserSession.getCookies());
-        log.warning(`Patchright warm-up did not complete: ${error.message}`);
-    }
-
     const impitClient = new Impit({
         browser: 'chrome',
         ...(proxyUrl && { proxyUrl }),
     });
     let activeClient = impitClient;
+    let browserSessionPromise;
+
+    const ensureBrowserSession = async () => {
+        if (browserSession) return browserSession;
+        if (!browserSessionPromise) {
+            log.info('Starting Patchright Chrome fallback session after a confirmed access challenge.');
+            browserSessionPromise = createBrowserClient(proxyUrl, cookieJar)
+                .then((session) => {
+                    browserSession = session;
+                    return session;
+                })
+                .finally(() => {
+                    browserSessionPromise = undefined;
+                });
+        }
+        return browserSessionPromise;
+    };
 
     const switchToBrowser = async () => {
-        if (activeClient !== browserSession.client) {
+        const session = await ensureBrowserSession();
+        if (activeClient !== session.client) {
             log.warning(
-                'NGOBase funding agency access challenge detected; reusing the warmed Patchright Chrome session.',
+                'NGOBase funding agency access challenge detected; reusing the Patchright Chrome fallback session.',
             );
         }
-        seedCookieJar(cookieJar, await browserSession.getCookies());
-        activeClient = browserSession.client;
+        await session.setCookies();
+        seedCookieJar(cookieJar, await session.getCookies());
+        activeClient = session.client;
         return activeClient;
     };
 
