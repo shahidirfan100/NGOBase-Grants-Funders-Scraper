@@ -48,6 +48,16 @@ describe('NGOBase funding agency input modes', () => {
         expect(client.requests).toHaveLength(0);
     });
 
+    it('uses the explicit filter when a defaulted keyword is also resolved', async () => {
+        const client = new MockClient();
+        const input = normalizeInput({ keyword: 'UNICEF', country: 'Canada' });
+        const [target] = await prepareTargets(client, input, new Map());
+        const filterRequest = client.requests.find(({ url }) => new URL(url).pathname === '/agency_filter_redirect');
+
+        expect(target.url).toBe('https://ngobase.org/agencies/c/CA');
+        expect(filterRequest.options.body).toContain('agency_country=CA');
+    });
+
     it('resolves country and agency-type filters and applies sorting', async () => {
         const client = new MockClient();
         const input = normalizeInput({ country: 'Canada', agencyType: 'Government Agency' });

@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -13,9 +12,12 @@ const BASE_URL = 'https://ngobase.org/funding-agencies';
 const DEFAULT_RESULTS_WANTED = 20;
 const DEFAULT_MAX_PAGES = 10;
 const MAX_RETRIES = 3;
+const MAX_RECOVERIES = 8;
+const MAX_PROXY_SESSIONS = 3;
 const REQUEST_TIMEOUT_MS = 30000;
 const RETRY_BASE_DELAY_MS = 1000;
 const RETRY_MAX_DELAY_MS = 10000;
+const IMPIT_PROFILES = ['chrome', 'firefox'];
 const SORT_VALUES = new Set(['', 'name_a_to_z', 'type_name']);
 
 let browserSession;
@@ -370,14 +372,6 @@ export function applySort(url, sort, sortBase) {
     return sortedUrl.href;
 }
 
-function getProxyUrl(proxyConfiguration, proxyConfigurationObject) {
-    if (proxyConfigurationObject) return proxyConfigurationObject.newUrl();
-    if (!Actor.isAtHome() && Array.isArray(proxyConfiguration?.proxyUrls) && proxyConfiguration.proxyUrls.length > 0) {
-        return proxyConfiguration.proxyUrls[0];
-    }
-    return undefined;
-}
-
 function isAccessChallengeError(error) {
     return /HTTP 403|access denied|cloudflare|challenge|just a moment/i.test(String(error?.message || error));
 }
@@ -435,24 +429,37 @@ async function createBrowserClient(proxyUrl, cookieJar) {
     const context = await chromium.launchPersistentContext(join(tmpdir(), `ngobase-profile-${process.pid}`), {
         channel: 'chrome',
         headless: false,
-        noViewport: true,
         ...(proxyUrl && { proxy: toPlaywrightProxy(proxyUrl) }),
     });
 
     const setCookies = async () => {
         if (!cookieJar?.size) return;
-        await context.addCookies(
-            [...cookieJar.entries()].map(([name, value]) => ({
-                name,
-                value,
-                domain: '.ngobase.org',
-                path: '/',
-            })),
-        );
+        try {
+            await context.addCookies(
+                [...cookieJar.entries()].map(([name, value]) => ({
+                    name,
+                    value,
+                    domain: '.ngobase.org',
+                    path: '/',
+                })),
+            );
+        } catch (error) {
+            log.debug(`Cookie handoff to the fallback browser was skipped: ${error.message}`);
+        }
     };
 
     await setCookies();
     const page = await context.newPage();
+
+    const settleChallenge = async () => {
+        for (let attempt = 0; attempt < 5; attempt++) {
+            await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+            const html = await page.content();
+            if (hasAgencyContent(html) || !isChallengeHtml(html)) return html;
+            await page.waitForTimeout(2000 + attempt * 2000);
+        }
+        return page.content();
+    };
 
     const client = {
         async fetch(url, options = {}) {
@@ -460,19 +467,13 @@ async function createBrowserClient(proxyUrl, cookieJar) {
             const timeout = options.timeout ?? REQUEST_TIMEOUT_MS;
 
             if (method === 'GET') {
+                const referer = options.headers?.get?.('referer');
                 const response = await page.goto(url, {
                     waitUntil: 'commit',
                     timeout,
-                    ...(options.headers?.get?.('referer') && { referer: options.headers.get('referer') }),
+                    ...(referer && { referer }),
                 });
-                await page.waitForLoadState('domcontentloaded', { timeout: Math.min(timeout, 10000) }).catch(() => {});
-                let html = await page.content();
-                for (let attempt = 0; attempt < 3 && isChallengeHtml(html); attempt++) {
-                    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-                    await page.waitForTimeout(5000 * (attempt + 1));
-                    html = await page.content();
-                }
-
+                const html = await settleChallenge();
                 const responseHeaders = response?.headers() || { 'content-type': 'text/html; charset=UTF-8' };
                 const responseStatus = response?.status();
                 let status = responseStatus || 200;
@@ -509,15 +510,20 @@ async function createBrowserClient(proxyUrl, cookieJar) {
             return browserResponse(result.status, result.url || url, result.headers, result.body);
         },
         getCookies: async () => context.cookies('https://ngobase.org'),
+        warmUp: async (url) => {
+            await page.goto(url, { waitUntil: 'commit', timeout: REQUEST_TIMEOUT_MS }).catch(() => {});
+            await settleChallenge();
+        },
     };
 
     return {
         client,
         getCookies: client.getCookies,
+        warmUp: client.warmUp,
         setCookies,
         close: async () => {
-            await page.close();
-            await context.close();
+            await page.close().catch(() => {});
+            await context.close().catch(() => {});
         },
     };
 }
@@ -573,85 +579,177 @@ function readToken(html) {
 }
 
 export async function prepareTargets(client, input, cookieJar) {
-    if (input.keyword) {
-        return [{ url: buildKeywordUrl(input.keyword), sortBase: undefined }];
-    }
-
     if (input.country || input.state || input.agencyType) {
         const bootstrap = await fetchHtml(client, BASE_URL, cookieJar, undefined, 'Load NGOBase filter options');
         const target = await resolveFilterTarget(client, input, cookieJar, bootstrap);
         return [target];
     }
 
+    if (input.keyword) {
+        return [{ url: buildKeywordUrl(input.keyword), sortBase: undefined }];
+    }
+
     return [{ url: BASE_URL, sortBase: undefined }];
 }
 
-async function getInput() {
-    const actorInput = await Actor.getInput();
-    if (actorInput && Object.keys(actorInput).length > 0) return actorInput;
+function createImpitClient(profile, proxyUrl) {
+    return new Impit({
+        browser: profile,
+        ...(proxyUrl && { proxyUrl }),
+    });
+}
 
-    try {
-        const fallback = await readFile(new URL('../INPUT.json', import.meta.url), 'utf8');
-        return JSON.parse(fallback);
-    } catch {
-        return {};
-    }
+function createProxyProvider(proxyConfiguration, proxyConfigurationObject) {
+    const proxyUrls = Array.isArray(proxyConfiguration?.proxyUrls)
+        ? proxyConfiguration.proxyUrls.filter((value) => typeof value === 'string' && value)
+        : [];
+    let userSessions = 0;
+    let customIndex = 0;
+    let residentialSessions = 0;
+    let residentialConfiguration;
+
+    const nextUserProxy = async () => {
+        if (proxyConfigurationObject) {
+            if (userSessions >= MAX_PROXY_SESSIONS) return undefined;
+            const sessionId = `ngobase_${process.pid}_${Date.now()}_${userSessions}`;
+            userSessions += 1;
+            return proxyConfigurationObject.newUrl(sessionId);
+        }
+        if (proxyUrls.length > 0 && !Actor.isAtHome()) {
+            if (customIndex >= proxyUrls.length) return undefined;
+            const value = proxyUrls[customIndex];
+            customIndex += 1;
+            return value;
+        }
+        return undefined;
+    };
+
+    const nextResidentialProxy = async () => {
+        if (!Actor.isAtHome()) return undefined;
+        if (residentialSessions >= MAX_PROXY_SESSIONS) return undefined;
+        if (!residentialConfiguration) {
+            try {
+                residentialConfiguration = await Actor.createProxyConfiguration({
+                    useApifyProxy: true,
+                    apifyProxyGroups: ['RESIDENTIAL'],
+                });
+            } catch (error) {
+                log.debug(`Residential proxy recovery is unavailable: ${error.message}`);
+                return undefined;
+            }
+        }
+        const sessionId = `ngobase_res_${process.pid}_${Date.now()}_${residentialSessions}`;
+        residentialSessions += 1;
+        return residentialConfiguration.newUrl(sessionId);
+    };
+
+    return {
+        initial: () => nextUserProxy(),
+        recovery: async () => (await nextUserProxy()) || (await nextResidentialProxy()),
+    };
+}
+
+async function closeBrowserSession() {
+    if (!browserSession) return;
+    const session = browserSession;
+    browserSession = undefined;
+    await session.close();
+}
+
+async function openBrowserSession(proxyUrl, cookieJar) {
+    await closeBrowserSession();
+    log.warning('Starting the Chrome fallback session to clear the NGOBase access challenge.');
+    const session = await createBrowserClient(proxyUrl, cookieJar);
+    browserSession = session;
+    await session.warmUp(BASE_URL);
+    seedCookieJar(cookieJar, await session.getCookies());
+    return session;
 }
 
 async function run() {
-    const input = normalizeInput(await getInput());
+    const input = normalizeInput((await Actor.getInput()) || {});
     const resultsWanted = parseNumber(input.resultsWanted ?? input.results_wanted, DEFAULT_RESULTS_WANTED);
     const maxPages = parseNumber(input.maxPages ?? input.max_pages, DEFAULT_MAX_PAGES);
     const sort = normalizeSort(input.sorting ?? input.sort);
     const { proxyConfiguration } = input;
-    const proxyConfigurationObject =
-        proxyConfiguration && Actor.isAtHome() ? await Actor.createProxyConfiguration(proxyConfiguration) : undefined;
-    const proxyUrl = await getProxyUrl(proxyConfiguration, proxyConfigurationObject);
-    const cookieJar = new Map();
-    const impitClient = new Impit({
-        browser: 'chrome',
-        ...(proxyUrl && { proxyUrl }),
-    });
-    let activeClient = impitClient;
-    let browserSessionPromise;
 
-    const ensureBrowserSession = async () => {
-        if (browserSession) return browserSession;
-        if (!browserSessionPromise) {
-            log.info('Starting Patchright Chrome fallback session after a confirmed access challenge.');
-            browserSessionPromise = createBrowserClient(proxyUrl, cookieJar)
-                .then((session) => {
-                    browserSession = session;
-                    return session;
-                })
-                .finally(() => {
-                    browserSessionPromise = undefined;
-                });
+    let proxyConfigurationObject;
+    if (proxyConfiguration && Actor.isAtHome()) {
+        try {
+            proxyConfigurationObject = await Actor.createProxyConfiguration(proxyConfiguration);
+        } catch (error) {
+            log.warning(`Ignoring the invalid proxy configuration: ${error.message}`);
         }
-        return browserSessionPromise;
-    };
-
-    const switchToBrowser = async () => {
-        const session = await ensureBrowserSession();
-        if (activeClient !== session.client) {
-            log.warning(
-                'NGOBase funding agency access challenge detected; reusing the Patchright Chrome fallback session.',
-            );
-        }
-        await session.setCookies();
-        seedCookieJar(cookieJar, await session.getCookies());
-        activeClient = session.client;
-        return activeClient;
-    };
-
-    let targets;
-    try {
-        targets = await prepareTargets(activeClient, input, cookieJar);
-    } catch (error) {
-        if (!isAccessChallengeError(error)) throw error;
-        await switchToBrowser();
-        targets = await prepareTargets(activeClient, input, cookieJar);
     }
+
+    const proxyProvider = createProxyProvider(proxyConfiguration, proxyConfigurationObject);
+    const initialProxyUrl = await proxyProvider.initial();
+    const cookieJar = new Map();
+    const state = {
+        kind: 'impit',
+        profileIndex: 0,
+        proxyUrl: initialProxyUrl,
+        proxyProvider,
+        proxyExhausted: false,
+        client: createImpitClient(IMPIT_PROFILES[0], initialProxyUrl),
+    };
+
+    const recoverSession = async (label) => {
+        if (state.proxyProvider && !state.proxyExhausted) {
+            const proxyUrl = await state.proxyProvider.recovery();
+            if (proxyUrl && proxyUrl !== state.proxyUrl) {
+                state.proxyUrl = proxyUrl;
+                state.profileIndex = 0;
+                state.kind = 'impit';
+                state.client = createImpitClient(IMPIT_PROFILES[0], proxyUrl);
+                await closeBrowserSession();
+                log.warning(`${label}: NGOBase access challenge; retrying through a fresh proxy session.`);
+                return true;
+            }
+            state.proxyExhausted = true;
+        }
+
+        if (state.kind === 'impit' && state.profileIndex + 1 < IMPIT_PROFILES.length) {
+            state.profileIndex += 1;
+            state.client = createImpitClient(IMPIT_PROFILES[state.profileIndex], state.proxyUrl);
+            log.warning(
+                `${label}: NGOBase access challenge; retrying with the ${IMPIT_PROFILES[state.profileIndex]} profile.`,
+            );
+            return true;
+        }
+
+        if (state.kind !== 'browser') {
+            try {
+                const session = await openBrowserSession(state.proxyUrl, cookieJar);
+                state.client = session.client;
+                state.kind = 'browser';
+                return true;
+            } catch (error) {
+                log.warning(`${label}: Chrome fallback could not start: ${error.message}`);
+                return false;
+            }
+        }
+
+        return false;
+    };
+
+    const withRecovery = async (label, operation) => {
+        for (let attempt = 0; attempt <= MAX_RECOVERIES; attempt++) {
+            try {
+                return await operation(state.client);
+            } catch (error) {
+                if (!isAccessChallengeError(error) || attempt === MAX_RECOVERIES) throw error;
+                const recovered = await recoverSession(label);
+                if (!recovered) throw error;
+            }
+        }
+
+        throw new Error(`${label}: NGOBase access challenge could not be recovered after ${MAX_RECOVERIES} attempts.`);
+    };
+
+    const targets = await withRecovery('Prepare NGOBase target', (client) =>
+        prepareTargets(client, input, cookieJar),
+    );
     const scrapedAt = new Date().toISOString();
     const seen = new Set();
     let saved = 0;
@@ -666,15 +764,13 @@ async function run() {
         let pageUrl = applySort(target.url, sort, target.sortBase);
 
         for (let pageIndex = 0; pageIndex < maxPages && saved < resultsWanted; pageIndex++) {
-            let response;
-            try {
-                response = await fetchHtml(activeClient, pageUrl, cookieJar, target.url, `Fetch page ${pageIndex + 1}`);
-            } catch (error) {
-                if (activeClient !== impitClient || !isAccessChallengeError(error)) throw error;
-                await switchToBrowser();
-                response = await fetchHtml(activeClient, pageUrl, cookieJar, target.url, `Fetch page ${pageIndex + 1}`);
-            }
+            const label = `Fetch page ${pageIndex + 1}`;
+            const currentUrl = pageUrl;
+            const response = await withRecovery(label, (client) =>
+                fetchHtml(client, currentUrl, cookieJar, target.url, label),
+            );
             pagesProcessed++;
+
             const items = parseAgencyListings(response.html, response.url, scrapedAt)
                 .filter((item) => {
                     const key = item.url || item.id || `${item.name}-${item.country || ''}`;
@@ -702,15 +798,22 @@ async function run() {
 
 async function main() {
     await Actor.init();
+    let failure;
     try {
         await run();
     } catch (error) {
-        log.exception(error, 'NGOBase funding agency run failed');
-        await Actor.fail();
+        failure = error;
     } finally {
-        if (browserSession) await browserSession.close();
-        await Actor.exit();
+        await closeBrowserSession();
     }
+
+    if (failure) {
+        log.exception(failure, 'NGOBase funding agency run failed');
+        await Actor.exit({ exitCode: 1 });
+        return;
+    }
+
+    await Actor.exit();
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

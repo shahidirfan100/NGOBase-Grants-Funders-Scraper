@@ -40,20 +40,20 @@ Each item can include the agency name, NGOBase profile URL, logo, country, agenc
 5. Run the Actor.
 6. Review the dataset, then download it or connect it to your workflow.
 
-Keyword searches are treated as a separate search mode. When a keyword is supplied, it is used as the agency search and unrelated location filters are not added automatically. When no keyword is supplied, the Actor uses the selected directory filters or the worldwide funding agency directory.
+Search modes are treated separately. When a country, state or province, or agency type filter is supplied, it is used as the search and the keyword is ignored so the filter is never mixed with an unrelated keyword. When no filter is supplied but a keyword is provided, the Actor runs an agency-name search. When neither is supplied, it browses the worldwide funding agency directory.
 
 ## Input Parameters
 
 | Parameter            | Type    | Required | Default         | Description                                                               |
 | -------------------- | ------- | -------- | --------------- | ------------------------------------------------------------------------- |
-| `keyword`            | String  | No       | `UNICEF` for QA | Agency name or public listing text to search                              |
+| `keyword`            | String  | No       | `UNICEF`        | Agency name or public listing text to search                              |
 | `country`            | String  | No       | -               | Country name or NGOBase country code                                      |
 | `state`              | String  | No       | -               | State or province name or code; requires `country`                        |
 | `agencyType`         | String  | No       | -               | Agency type code such as `ga` for Government Agency or `un` for UN Agency |
 | `sorting`            | String  | No       | `default`       | `default`, `name_a_to_z`, or `type_name`                                  |
 | `resultsWanted`      | Integer | No       | `20`            | Maximum number of unique records to save                                  |
 | `maxPages`           | Integer | No       | `10`            | Maximum listing pages to request                                          |
-| `proxyConfiguration` | Object  | No       | Apify Proxy     | Optional proxy settings for larger or protected runs                      |
+| `proxyConfiguration` | Object  | No       | Residential proxy | Optional proxy settings; residential Apify Proxy is used by default for reliability |
 
 Agency type values are available in the Apify input form. The supported codes are `cf` for Corporate Foundation / CSR, `em` for Embassy / Diplomatic Mission, `ff` for Family Foundation, `ga` for Government Agency, `ii` for Impact Investment Firm, `ias` for Industry Association, `ida` for International Development Aid Agency, `ot` for Other, `pbf` for Private / Public Foundation, and `un` for UN Agency.
 
@@ -140,7 +140,7 @@ Collect funding agencies listed for Ontario, Canada:
 - Use the exact country or agency type shown in the input form when possible.
 - Provide a country before using a state or province filter.
 - Use `maxPages` as a safety limit for broad directory searches.
-- Enable Apify Proxy for larger, repeated, or scheduled runs if the source presents an access challenge.
+- Residential Apify Proxy is used by default so protected runs stay reliable, and the Actor automatically rotates proxy sessions and request profiles if the source presents an access challenge.
 - Review the dataset preview and check missing fields against the source listing. Missing values usually mean NGOBase did not publish that field.
 - Public directory pages can change. Report changed markup, missing records, or incorrect fields through the Actor Issues tab.
 

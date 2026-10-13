@@ -9,7 +9,8 @@
             "type": "string",
             "description": "Search funding agency names and public listing text.",
             "editor": "textfield",
-            "prefill": "UNICEF"
+            "prefill": "UNICEF",
+            "default": "UNICEF"
         },
         "country": {
             "title": "Country",
@@ -50,8 +51,7 @@
             "editor": "select",
             "enum": ["default", "name_a_to_z", "type_name"],
             "enumTitles": ["Default (by popularity)", "Agency name A to Z", "Agency type"],
-            "default": "default",
-            "prefill": "default"
+            "default": "default"
         },
         "resultsWanted": {
             "title": "Results wanted",
@@ -59,7 +59,6 @@
             "description": "Maximum number of unique funding agency records to save.",
             "minimum": 1,
             "default": 20,
-            "prefill": 20,
             "editor": "number"
         },
         "maxPages": {
@@ -68,16 +67,16 @@
             "description": "Maximum listing pages to request for the selected funding agency target.",
             "minimum": 1,
             "default": 10,
-            "prefill": 3,
             "editor": "number"
         },
         "proxyConfiguration": {
             "title": "Proxy configuration",
             "type": "object",
-            "description": "Optional Apify Proxy configuration for reliable runs.",
+            "description": "Optional proxy settings. NGOBase sits behind a browser challenge, so residential Apify Proxy is used by default and rotating sessions recover from temporary blocks.",
             "editor": "proxy",
             "default": {
-                "useApifyProxy": true
+                "useApifyProxy": true,
+                "apifyProxyGroups": ["RESIDENTIAL"]
             }
         }
     },

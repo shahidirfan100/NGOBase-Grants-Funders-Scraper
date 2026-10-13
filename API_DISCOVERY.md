@@ -46,10 +46,16 @@ The Actor does not request agency detail pages. The detail HTML adds limited ext
 ## Request and session behavior
 
 - The Actor uses `impit` for the fast direct-request path and does not start Chrome during normal runs.
-- If a direct listing or filter request receives a confirmed access challenge, Patchright real Chrome is started lazily as a fallback.
+- `impit` profiles verified against the live target on 2026-10-13: `chrome` and `firefox` both returned HTTP 200 with agency rows, so `chrome` is the primary profile and `firefox` is the first rotation fallback.
+- If a direct listing or filter request receives a confirmed access challenge, the Actor recovers in bounded steps instead of failing immediately:
+  1. rotate to the next `impit` profile (`chrome` to `firefox`);
+  2. rotate to a fresh Apify Proxy session;
+  3. escalate to socialized Apify Proxy `RESIDENTIAL` sessions when the configured sessions stay blocked;
+  4. start Patchright real Chrome, warm up on `https://ngobase.org/funding-agencies`, and continue with the browser.
 - Cookies collected by `impit` are transferred into the fallback browser context, and browser cookies are handed back to subsequent requests.
 - Filter resolution keeps the CSRF token, referer, and shared cookie jar together.
-- Apify Proxy can be supplied through `proxyConfiguration`; the browser and direct requests use the same selected proxy URL.
+- Apify Proxy can be supplied through `proxyConfiguration`. The default uses residential Apify Proxy because the browser challenge rejected datacenter proxy egress with HTTP 403 during the failing QA run; the Actor still rotates sessions and can fall back to residential if a user selects another group.
+- Apify proxy session IDs accept only `[A-Za-z0-9._~]` characters, so rotation uses `ngobase_<pid>_<timestamp>_<n>` (hyphens are rejected by `ProxyConfiguration.newUrl`).
 - The Actor retries temporary network errors and HTTP 429 or 5xx responses with bounded delays.
 - No authorization token, API key, or cookie value is hardcoded in the Actor.
 

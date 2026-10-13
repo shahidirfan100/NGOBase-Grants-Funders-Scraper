@@ -4,6 +4,7 @@ COPY --chown=myuser:myuser package*.json Dockerfile ./
 
 RUN npm --quiet set progress=false \
     && npm install --omit=dev --include=optional --legacy-peer-deps --no-audit --no-fund \
+    && node -e "import('impit').then((m) => console.log('impit OK:', Object.keys(m)))" \
     && echo "Installed NPM packages:" \
     && (npm list --omit=dev --all || true) \
     && echo "Node.js version:" \
