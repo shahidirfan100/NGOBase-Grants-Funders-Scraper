@@ -437,14 +437,16 @@ async function createBrowserClient(proxyUrl, cookieJar) {
     const context = await chromium.launchPersistentContext(profileDir, {
         channel: 'chrome',
         headless: false,
-        noViewport: true,
+        viewport: null,
         locale: 'en-US',
+        // Patchright 1.57+ regressions stopped launchPersistentContext from
+        // stripping Chrome's --enable-automation flag; pass it explicitly.
+        ignoreDefaultArgs: ['--enable-automation'],
         // Unblocker MITMs HTTPS, so accept its certificate for that route only.
         ignoreHTTPSErrors: isUnblockerProxyUrl(proxyUrl),
-        // Keep only container-safe flags: Patchright already patches the CDP
-        // automation surface, and disabling Chromium features such as client
-        // hints (Accept-CH) breaks Cloudflare's Critical-CH negotiation.
-        args: ['--no-sandbox', '--disable-dev-shm-usage'],
+        // Keep browser defaults otherwise; only stop WebRTC from leaking the
+        // real IP behind the proxy.
+        args: ['--webrtc-ip-handling-policy=disable_non_proxied_udp'],
         ...(proxyUrl && { proxy: toPlaywrightProxy(proxyUrl) }),
     });
 
@@ -776,9 +778,10 @@ function createProxyProvider(proxyConfiguration, proxyConfigurationObject) {
     };
 
     return {
-        // Prefer the user's proxy, then fall back to Apify Unblocker, which is
-        // the only route that has cleared this Cloudflare managed challenge.
-        initial: async () => (await nextPrimary()) || (await nextUnblockerProxy()),
+        // Start with the user's proxy, or direct when none is configured: the
+        // stealth browser clears the challenge on a plain connection. Unblocker
+        // and residential are reserved for recovery escalation.
+        initial: () => nextPrimary(),
         recovery: async () => {
             const primary = await nextPrimary();
             if (primary) return primary;

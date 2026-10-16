@@ -72,12 +72,9 @@
         "proxyConfiguration": {
             "title": "Proxy configuration",
             "type": "object",
-            "description": "Optional proxy settings. NGOBase is behind a Cloudflare managed challenge, so Apify Unblocker proxy is used by default to clear it automatically. Residential proxy and custom proxies are supported as fallbacks.",
+            "description": "Optional proxy settings. NGOBase is cleared by the Actor's stealth browser without a proxy by default. Apify Unblocker or residential proxies can be selected for extra reliability on aggressively challenged IPs.",
             "editor": "proxy",
-            "default": {
-                "useApifyProxy": true,
-                "apifyProxyGroups": ["UNBLOCKER"]
-            }
+            "default": {}
         }
     },
     "required": [],
