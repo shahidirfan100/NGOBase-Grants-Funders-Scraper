@@ -441,19 +441,10 @@ async function createBrowserClient(proxyUrl, cookieJar) {
         locale: 'en-US',
         // Unblocker MITMs HTTPS, so accept its certificate for that route only.
         ignoreHTTPSErrors: isUnblockerProxyUrl(proxyUrl),
-        // Maximum-stealth launch flags. Patchright already patches the CDP
-        // automation surface; these keep Chrome consistent and container-safe.
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-blink-features=AutomationControlled',
-            '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints',
-            '--no-first-run',
-            '--no-default-browser-check',
-            '--hide-scrollbars',
-            '--mute-audio',
-        ],
+        // Keep only container-safe flags: Patchright already patches the CDP
+        // automation surface, and disabling Chromium features such as client
+        // hints (Accept-CH) breaks Cloudflare's Critical-CH negotiation.
+        args: ['--no-sandbox', '--disable-dev-shm-usage'],
         ...(proxyUrl && { proxy: toPlaywrightProxy(proxyUrl) }),
     });
 
@@ -510,27 +501,30 @@ async function createBrowserClient(proxyUrl, cookieJar) {
 
             if (method === 'GET') {
                 const referer = options.headers?.get?.('referer');
-                const response = await page.goto(url, {
-                    waitUntil: 'domcontentloaded',
-                    timeout,
-                    ...(referer && { referer }),
-                });
-                const html = await resolveChallenge();
-                const responseHeaders = response?.headers() || { 'content-type': 'text/html; charset=UTF-8' };
-                const responseStatus = response?.status();
-                let status = responseStatus || 200;
-                if (hasAgencyContent(html)) status = 200;
-                else if (isChallengeHtml(html)) {
-                    status = responseStatus || 403;
-                    await Actor.setValue('challenge-diagnostic', {
-                        url: page.url(),
-                        title: await page.title().catch(() => ''),
-                        webdriver: await page.evaluate(() => navigator.webdriver).catch(() => null),
-                        hasClearance: await hasClearance(),
-                        hasTurnstile: /challenges\.cloudflare\.com|turnstile/i.test(html),
-                    }).catch(() => {});
+                let response;
+                try {
+                    response = await page.goto(url, {
+                        waitUntil: 'domcontentloaded',
+                        timeout,
+                        ...(referer && { referer }),
+                    });
+                } catch (error) {
+                    // Chromium aborts navigations that resolve to an error status
+                    // (e.g. net::ERR_HTTP_RESPONSE_CODE_FAILURE). Inspect whatever
+                    // rendered below and let the recovery ladder handle it.
+                    log.debug(`Navigation to ${url} reported: ${error.message}`);
                 }
-                return browserResponse(status, page.url(), responseHeaders, html);
+
+                const html = await resolveChallenge();
+                if (hasAgencyContent(html)) {
+                    const responseHeaders = response?.headers() || { 'content-type': 'text/html; charset=UTF-8' };
+                    return browserResponse(200, page.url(), responseHeaders, html);
+                }
+
+                const responseStatus = response?.status();
+                throw new Error(
+                    `NGOBase access challenge; navigation did not return agency content${responseStatus ? ` (HTTP ${responseStatus})` : ''}.`,
+                );
             }
 
             const requestHeaders = Object.fromEntries(new Headers(options.headers || {}).entries());

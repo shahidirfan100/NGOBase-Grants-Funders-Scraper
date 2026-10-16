@@ -3,7 +3,7 @@
     "name": "ngobase-funding-agencies-scraper",
     "version": "1.0",
     "buildTag": "latest",
-    "minMemoryMbytes": 1024,
+    "minMemoryMbytes": 2048,
     "maxMemoryMbytes": 4096,
     "dockerfile": "../Dockerfile",
     "readme": "../README.md",
