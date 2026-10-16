@@ -53,7 +53,7 @@ Search modes are treated separately. When a country, state or province, or agenc
 | `sorting`            | String  | No       | `default`       | `default`, `name_a_to_z`, or `type_name`                                  |
 | `resultsWanted`      | Integer | No       | `20`            | Maximum number of unique records to save                                  |
 | `maxPages`           | Integer | No       | `10`            | Maximum listing pages to request                                          |
-| `proxyConfiguration` | Object  | No       | Residential proxy | Optional proxy settings; residential Apify Proxy is used by default for reliability |
+| `proxyConfiguration` | Object  | No       | Unblocker proxy | Optional proxy settings; Apify Unblocker proxy is used by default to clear the Cloudflare challenge |
 
 Agency type values are available in the Apify input form. The supported codes are `cf` for Corporate Foundation / CSR, `em` for Embassy / Diplomatic Mission, `ff` for Family Foundation, `ga` for Government Agency, `ii` for Impact Investment Firm, `ias` for Industry Association, `ida` for International Development Aid Agency, `ot` for Other, `pbf` for Private / Public Foundation, and `un` for UN Agency.
 
@@ -140,7 +140,7 @@ Collect funding agencies listed for Ontario, Canada:
 - Use the exact country or agency type shown in the input form when possible.
 - Provide a country before using a state or province filter.
 - Use `maxPages` as a safety limit for broad directory searches.
-- Residential Apify Proxy is used by default so protected runs stay reliable, and the Actor automatically rotates proxy sessions and request profiles if the source presents an access challenge.
+- Apify Unblocker proxy is used by default so the Cloudflare challenge is cleared automatically, and the Actor rotates proxy routes, request profiles, and falls back to a real browser session if the source presents an access challenge.
 - Review the dataset preview and check missing fields against the source listing. Missing values usually mean NGOBase did not publish that field.
 - Public directory pages can change. Report changed markup, missing records, or incorrect fields through the Actor Issues tab.
 

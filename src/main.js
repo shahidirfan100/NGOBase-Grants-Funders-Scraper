@@ -12,13 +12,20 @@ const BASE_URL = 'https://ngobase.org/funding-agencies';
 const DEFAULT_RESULTS_WANTED = 20;
 const DEFAULT_MAX_PAGES = 10;
 const MAX_RETRIES = 3;
-const MAX_RECOVERIES = 8;
-const MAX_PROXY_SESSIONS = 3;
+const MAX_RECOVERIES = 10;
+const MAX_PROXY_SESSIONS = 5;
 const REQUEST_TIMEOUT_MS = 30000;
+const UNBLOCKER_TIMEOUT_MS = 120000;
 const RETRY_BASE_DELAY_MS = 1000;
 const RETRY_MAX_DELAY_MS = 10000;
-const IMPIT_PROFILES = ['chrome', 'firefox'];
+const CHALLENGE_TIMEOUT_MS = 60000;
 const SORT_VALUES = new Set(['', 'name_a_to_z', 'type_name']);
+
+// A bounded rotation subset of the impit 0.14.x `Browser` union (the full union
+// also includes `chrome142`, `chrome151`, `firefox135`, `firefox144`, `okhttp*`,
+// and older `chrome1xx` variants). The ladder starts with the newest desktop
+// Chrome profile and reaches the real-browser fallback before the budget ends.
+const IMPIT_PROFILES = ['chrome', 'chrome131', 'firefox', 'firefox133'];
 
 let browserSession;
 
@@ -248,7 +255,7 @@ async function fetchWithRetry(client, url, options, cookieJar, label) {
             const response = await client.fetch(url, {
                 ...options,
                 headers,
-                timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
+                timeout: options.timeout ?? client.requestTimeoutMs ?? REQUEST_TIMEOUT_MS,
             });
             if (!response || !Number.isInteger(response.status)) {
                 throw new Error(`${label}: invalid HTTP response`);
@@ -426,9 +433,27 @@ export function isChallengeHtml(html) {
 }
 
 async function createBrowserClient(proxyUrl, cookieJar) {
-    const context = await chromium.launchPersistentContext(join(tmpdir(), `ngobase-profile-${process.pid}`), {
+    const profileDir = join(tmpdir(), `ngobase-profile-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const context = await chromium.launchPersistentContext(profileDir, {
         channel: 'chrome',
         headless: false,
+        noViewport: true,
+        locale: 'en-US',
+        // Unblocker MITMs HTTPS, so accept its certificate for that route only.
+        ignoreHTTPSErrors: isUnblockerProxyUrl(proxyUrl),
+        // Maximum-stealth launch flags. Patchright already patches the CDP
+        // automation surface; these keep Chrome consistent and container-safe.
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--hide-scrollbars',
+            '--mute-audio',
+        ],
         ...(proxyUrl && { proxy: toPlaywrightProxy(proxyUrl) }),
     });
 
@@ -451,34 +476,60 @@ async function createBrowserClient(proxyUrl, cookieJar) {
     await setCookies();
     const page = await context.newPage();
 
-    const settleChallenge = async () => {
-        for (let attempt = 0; attempt < 5; attempt++) {
-            await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
-            const html = await page.content();
-            if (hasAgencyContent(html) || !isChallengeHtml(html)) return html;
-            await page.waitForTimeout(2000 + attempt * 2000);
+    const hasClearance = async () => {
+        const cookies = await context.cookies('https://ngobase.org').catch(() => []);
+        return cookies.some((cookie) => cookie.name === 'cf_clearance' && cookie.value);
+    };
+
+    // Cloudflare managed challenge: wait for the browser to solve the challenge,
+    // obtain the cf_clearance cookie, then reload to fetch the real page. The
+    // wait is bounded so a permanently blocked session fails instead of hanging.
+    const resolveChallenge = async () => {
+        const deadline = Date.now() + CHALLENGE_TIMEOUT_MS;
+        let html = '';
+        while (Date.now() < deadline) {
+            await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
+            html = await page.content().catch(() => '');
+            if (hasAgencyContent(html)) return html;
+
+            if (await hasClearance()) {
+                await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                html = await page.content().catch(() => '');
+                if (hasAgencyContent(html)) return html;
+            }
+            await page.waitForTimeout(2500);
         }
-        return page.content();
+        return html || (await page.content().catch(() => ''));
     };
 
     const client = {
+        requestTimeoutMs: isUnblockerProxyUrl(proxyUrl) ? UNBLOCKER_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
         async fetch(url, options = {}) {
             const method = options.method || 'GET';
-            const timeout = options.timeout ?? REQUEST_TIMEOUT_MS;
+            const timeout = options.timeout ?? client.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
 
             if (method === 'GET') {
                 const referer = options.headers?.get?.('referer');
                 const response = await page.goto(url, {
-                    waitUntil: 'commit',
+                    waitUntil: 'domcontentloaded',
                     timeout,
                     ...(referer && { referer }),
                 });
-                const html = await settleChallenge();
+                const html = await resolveChallenge();
                 const responseHeaders = response?.headers() || { 'content-type': 'text/html; charset=UTF-8' };
                 const responseStatus = response?.status();
                 let status = responseStatus || 200;
                 if (hasAgencyContent(html)) status = 200;
-                else if (isChallengeHtml(html)) status = responseStatus || 403;
+                else if (isChallengeHtml(html)) {
+                    status = responseStatus || 403;
+                    await Actor.setValue('challenge-diagnostic', {
+                        url: page.url(),
+                        title: await page.title().catch(() => ''),
+                        webdriver: await page.evaluate(() => navigator.webdriver).catch(() => null),
+                        hasClearance: await hasClearance(),
+                        hasTurnstile: /challenges\.cloudflare\.com|turnstile/i.test(html),
+                    }).catch(() => {});
+                }
                 return browserResponse(status, page.url(), responseHeaders, html);
             }
 
@@ -507,12 +558,38 @@ async function createBrowserClient(proxyUrl, cookieJar) {
                     body: options.body,
                 },
             );
+
+            if (isChallengeHtml(result.body)) {
+                const solved = await resolveChallenge();
+                if (hasAgencyContent(solved)) {
+                    return browserResponse(200, page.url(), { 'content-type': 'text/html; charset=UTF-8' }, solved);
+                }
+            }
+
             return browserResponse(result.status, result.url || url, result.headers, result.body);
         },
         getCookies: async () => context.cookies('https://ngobase.org'),
+        // The origin rejects an XHR-style POST to /agency_filter_redirect with
+        // HTTP 419, so submit the site's own filter form as a real navigation.
+        async submitFilter({ country, state, agencyType }) {
+            if (country) await page.selectOption('#agency_country', country).catch(() => {});
+            if (state) await page.selectOption('#agency_state', state).catch(() => {});
+            if (agencyType) await page.selectOption('#agency_type', agencyType).catch(() => {});
+            await Promise.all([
+                page
+                    .waitForNavigation({ waitUntil: 'domcontentloaded', timeout: client.requestTimeoutMs })
+                    .catch(() => {}),
+                page.evaluate(() => {
+                    const form = document.getElementById('filter_form');
+                    if (form) form.submit();
+                }),
+            ]);
+            const html = await resolveChallenge();
+            return { html, url: page.url() };
+        },
         warmUp: async (url) => {
-            await page.goto(url, { waitUntil: 'commit', timeout: REQUEST_TIMEOUT_MS }).catch(() => {});
-            await settleChallenge();
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: client.requestTimeoutMs }).catch(() => {});
+            await resolveChallenge();
         },
     };
 
@@ -555,6 +632,16 @@ export async function resolveFilterTarget(client, input, cookieJar, bootstrap) {
     const hasFilter = country || state || agencyType;
     if (!hasFilter) return undefined;
 
+    // Native form submission (browser client) is the only flow the origin
+    // accepts for the filter redirect; direct POSTs return HTTP 419.
+    if (typeof client.submitFilter === 'function') {
+        return client.submitFilter({
+            country: country?.value || '',
+            state: state?.value || '',
+            agencyType: agencyType?.value || '',
+        });
+    }
+
     const filterResponse = await postForm(
         client,
         'https://ngobase.org/agency_filter_redirect',
@@ -592,30 +679,100 @@ export async function prepareTargets(client, input, cookieJar) {
     return [{ url: BASE_URL, sortBase: undefined }];
 }
 
+function isUnblockerProxyUrl(proxyUrl) {
+    if (!proxyUrl) return false;
+    try {
+        return /UNBLOCKER/i.test(new URL(proxyUrl).username);
+    } catch {
+        return false;
+    }
+}
+
 function createImpitClient(profile, proxyUrl) {
-    return new Impit({
+    const unblocker = isUnblockerProxyUrl(proxyUrl);
+    const client = new Impit({
         browser: profile,
         ...(proxyUrl && { proxyUrl }),
+        // Apify Unblocker terminates TLS and presents its own certificate, so
+        // certificate verification must be relaxed only for the Unblocker route.
+        ignoreTlsErrors: unblocker,
     });
+    // Cloudflare challenge solving inside Unblocker can exceed the normal
+    // request budget, so give the Unblocker route a longer timeout.
+    client.requestTimeoutMs = unblocker ? UNBLOCKER_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+    return client;
+}
+
+function detectProxyGroups(proxyConfiguration) {
+    const raw = proxyConfiguration?.apifyProxyGroups ?? proxyConfiguration?.groups ?? [];
+    const list = Array.isArray(raw) ? raw : [raw];
+    return list.map((group) => String(group || '').toUpperCase()).filter(Boolean);
 }
 
 function createProxyProvider(proxyConfiguration, proxyConfigurationObject) {
     const proxyUrls = Array.isArray(proxyConfiguration?.proxyUrls)
         ? proxyConfiguration.proxyUrls.filter((value) => typeof value === 'string' && value)
         : [];
-    let userSessions = 0;
-    let customIndex = 0;
-    let residentialSessions = 0;
-    let residentialConfiguration;
 
-    const nextUserProxy = async () => {
-        if (proxyConfigurationObject) {
-            if (userSessions >= MAX_PROXY_SESSIONS) return undefined;
-            const sessionId = `ngobase_${process.pid}_${Date.now()}_${userSessions}`;
-            userSessions += 1;
-            return proxyConfigurationObject.newUrl(sessionId);
+    const configuredGroups = detectProxyGroups(proxyConfiguration);
+    const usesUnblocker = configuredGroups.includes('UNBLOCKER');
+    const usesResidential = configuredGroups.includes('RESIDENTIAL');
+    const hasCustom = proxyUrls.length > 0;
+
+    let primaryMode = 'none';
+    if (usesUnblocker) primaryMode = 'unblocker';
+    else if (usesResidential) primaryMode = 'residential';
+    else if (hasCustom) primaryMode = 'custom';
+    else if (proxyConfiguration?.useApifyProxy) primaryMode = 'user';
+
+    let primaryAttempts = 0;
+    let customIndex = 0;
+    let unblockerAttempts = 0;
+    let unblockerConfiguration;
+
+    const sessionId = (prefix, n) => `ngobase_${prefix}_${process.pid}_${Date.now()}_${n}`;
+
+    // UNBLOCKER has no sticky session: each request is routed through Apify's
+    // managed anti-bot network and Cloudflare is solved at the proxy level.
+    const nextUnblockerProxy = async () => {
+        if (!Actor.isAtHome()) return undefined;
+        if (unblockerAttempts >= MAX_PROXY_SESSIONS) return undefined;
+        if (!unblockerConfiguration) {
+            // Reuse the Unblocker configuration already built from the user's
+            // proxy input when that input targets Unblocker.
+            if (primaryMode === 'unblocker' && proxyConfigurationObject) {
+                unblockerConfiguration = proxyConfigurationObject;
+            } else {
+                try {
+                    unblockerConfiguration = await Actor.createProxyConfiguration({
+                        groups: ['UNBLOCKER'],
+                    });
+                } catch (error) {
+                    log.warning(
+                        `Apify Unblocker proxy is unavailable for this account (${error.message}). `
+                            + 'NGOBase is behind a Cloudflare managed challenge, so a Cloudflare-solving proxy '
+                            + '(Apify Unblocker or residential proxies) is required; a browser-only session from a '
+                            + 'datacenter IP will usually stay blocked.',
+                    );
+                    unblockerAttempts = MAX_PROXY_SESSIONS;
+                    return undefined;
+                }
+            }
         }
-        if (proxyUrls.length > 0 && !Actor.isAtHome()) {
+        unblockerAttempts += 1;
+        return unblockerConfiguration.newUrl();
+    };
+
+    const nextPrimary = async () => {
+        if (primaryMode === 'unblocker') {
+            return nextUnblockerProxy();
+        }
+        if ((primaryMode === 'residential' || primaryMode === 'user') && proxyConfigurationObject) {
+            if (primaryAttempts >= MAX_PROXY_SESSIONS) return undefined;
+            primaryAttempts += 1;
+            return proxyConfigurationObject.newUrl(sessionId('primary', primaryAttempts));
+        }
+        if (primaryMode === 'custom') {
             if (customIndex >= proxyUrls.length) return undefined;
             const value = proxyUrls[customIndex];
             customIndex += 1;
@@ -624,28 +781,20 @@ function createProxyProvider(proxyConfiguration, proxyConfigurationObject) {
         return undefined;
     };
 
-    const nextResidentialProxy = async () => {
-        if (!Actor.isAtHome()) return undefined;
-        if (residentialSessions >= MAX_PROXY_SESSIONS) return undefined;
-        if (!residentialConfiguration) {
-            try {
-                residentialConfiguration = await Actor.createProxyConfiguration({
-                    useApifyProxy: true,
-                    apifyProxyGroups: ['RESIDENTIAL'],
-                });
-            } catch (error) {
-                log.debug(`Residential proxy recovery is unavailable: ${error.message}`);
-                return undefined;
-            }
-        }
-        const sessionId = `ngobase_res_${process.pid}_${Date.now()}_${residentialSessions}`;
-        residentialSessions += 1;
-        return residentialConfiguration.newUrl(sessionId);
-    };
-
     return {
-        initial: () => nextUserProxy(),
-        recovery: async () => (await nextUserProxy()) || (await nextResidentialProxy()),
+        // Prefer the user's proxy, then fall back to Apify Unblocker, which is
+        // the only route that has cleared this Cloudflare managed challenge.
+        initial: async () => (await nextPrimary()) || (await nextUnblockerProxy()),
+        recovery: async () => {
+            const primary = await nextPrimary();
+            if (primary) return primary;
+            // Escalate to Unblocker when the configured proxy (or a custom one)
+            // cannot clear the Cloudflare challenge.
+            return nextUnblockerProxy();
+        },
+        // The browser fallback always prefers Unblocker so Cloudflare is solved
+        // at the proxy before the page reaches the headless browser.
+        browserProxy: async (fallback) => (await nextUnblockerProxy()) || fallback,
     };
 }
 
@@ -658,10 +807,14 @@ async function closeBrowserSession() {
 
 async function openBrowserSession(proxyUrl, cookieJar) {
     await closeBrowserSession();
-    log.warning('Starting the Chrome fallback session to clear the NGOBase access challenge.');
+    log.warning('Starting the Patchright Chrome stealth session to fetch NGOBase data.');
     const session = await createBrowserClient(proxyUrl, cookieJar);
     browserSession = session;
-    await session.warmUp(BASE_URL);
+    // Unblocker solves the Cloudflare challenge at the proxy level for every
+    // request, so an extra in-browser warm-up would only add a duplicate solve.
+    if (!isUnblockerProxyUrl(proxyUrl)) {
+        await session.warmUp(BASE_URL);
+    }
     seedCookieJar(cookieJar, await session.getCookies());
     return session;
 }
@@ -686,30 +839,55 @@ async function run() {
     const initialProxyUrl = await proxyProvider.initial();
     const cookieJar = new Map();
     const state = {
-        kind: 'impit',
+        kind: 'browser',
         profileIndex: 0,
         proxyUrl: initialProxyUrl,
         proxyProvider,
-        proxyExhausted: false,
-        client: createImpitClient(IMPIT_PROFILES[0], initialProxyUrl),
+        client: undefined,
     };
 
+    // Patchright Chrome (stealth) is the primary client. It keeps one cookie
+    // session across the listing and filter flow and clears the Cloudflare
+    // managed challenge. Direct impit requests remain a fallback for
+    // environments where the browser cannot start.
+    try {
+        const session = await openBrowserSession(initialProxyUrl, cookieJar);
+        state.client = session.client;
+    } catch (error) {
+        log.warning(`Patchright session could not start (${error.message}); using direct requests.`);
+        state.kind = 'impit';
+        state.client = createImpitClient(IMPIT_PROFILES[0], initialProxyUrl);
+    }
+
     const recoverSession = async (label) => {
-        if (state.proxyProvider && !state.proxyExhausted) {
-            const proxyUrl = await state.proxyProvider.recovery();
-            if (proxyUrl && proxyUrl !== state.proxyUrl) {
-                state.proxyUrl = proxyUrl;
-                state.profileIndex = 0;
-                state.kind = 'impit';
-                state.client = createImpitClient(IMPIT_PROFILES[0], proxyUrl);
-                await closeBrowserSession();
-                log.warning(`${label}: NGOBase access challenge; retrying through a fresh proxy session.`);
+        const proxyUrl = await state.proxyProvider.recovery();
+
+        // Primary browser client: restart on a fresh proxy route so the cookie
+        // session and Cloudflare clearance are rebuilt cleanly.
+        if (state.kind === 'browser') {
+            if (!proxyUrl) return false;
+            state.proxyUrl = proxyUrl;
+            try {
+                const session = await openBrowserSession(proxyUrl, cookieJar);
+                state.client = session.client;
+                log.warning(`${label}: NGOBase access challenge; restarting the Patchright session on a fresh proxy route.`);
                 return true;
+            } catch (error) {
+                log.warning(`${label}: Patchright restart failed: ${error.message}`);
+                return false;
             }
-            state.proxyExhausted = true;
         }
 
-        if (state.kind === 'impit' && state.profileIndex + 1 < IMPIT_PROFILES.length) {
+        // Direct-request fallback ladder.
+        if (proxyUrl) {
+            state.proxyUrl = proxyUrl;
+            state.profileIndex = 0;
+            state.client = createImpitClient(IMPIT_PROFILES[0], proxyUrl);
+            log.warning(`${label}: NGOBase access challenge; retrying direct requests through a fresh proxy route.`);
+            return true;
+        }
+
+        if (state.profileIndex + 1 < IMPIT_PROFILES.length) {
             state.profileIndex += 1;
             state.client = createImpitClient(IMPIT_PROFILES[state.profileIndex], state.proxyUrl);
             log.warning(
@@ -718,19 +896,17 @@ async function run() {
             return true;
         }
 
-        if (state.kind !== 'browser') {
-            try {
-                const session = await openBrowserSession(state.proxyUrl, cookieJar);
-                state.client = session.client;
-                state.kind = 'browser';
-                return true;
-            } catch (error) {
-                log.warning(`${label}: Chrome fallback could not start: ${error.message}`);
-                return false;
-            }
+        // Escalate to the browser when direct requests keep failing.
+        try {
+            const browserProxyUrl = await state.proxyProvider.browserProxy(state.proxyUrl);
+            const session = await openBrowserSession(browserProxyUrl, cookieJar);
+            state.client = session.client;
+            state.kind = 'browser';
+            return true;
+        } catch (error) {
+            log.warning(`${label}: Patchright fallback could not start: ${error.message}`);
+            return false;
         }
-
-        return false;
     };
 
     const withRecovery = async (label, operation) => {
@@ -762,13 +938,21 @@ async function run() {
     for (const target of targets) {
         if (saved >= resultsWanted) break;
         let pageUrl = applySort(target.url, sort, target.sortBase);
+        let firstPageHtml = target.html;
 
         for (let pageIndex = 0; pageIndex < maxPages && saved < resultsWanted; pageIndex++) {
             const label = `Fetch page ${pageIndex + 1}`;
             const currentUrl = pageUrl;
-            const response = await withRecovery(label, (client) =>
-                fetchHtml(client, currentUrl, cookieJar, target.url, label),
-            );
+            let response;
+            if (firstPageHtml) {
+                // Reuse the filter result the browser already navigated to.
+                response = { html: firstPageHtml, url: target.url };
+                firstPageHtml = undefined;
+            } else {
+                response = await withRecovery(label, (client) =>
+                    fetchHtml(client, currentUrl, cookieJar, target.url, label),
+                );
+            }
             pagesProcessed++;
 
             const items = parseAgencyListings(response.html, response.url, scrapedAt)

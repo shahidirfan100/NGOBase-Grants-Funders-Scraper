@@ -72,11 +72,11 @@
         "proxyConfiguration": {
             "title": "Proxy configuration",
             "type": "object",
-            "description": "Optional proxy settings. NGOBase sits behind a browser challenge, so residential Apify Proxy is used by default and rotating sessions recover from temporary blocks.",
+            "description": "Optional proxy settings. NGOBase is behind a Cloudflare managed challenge, so Apify Unblocker proxy is used by default to clear it automatically. Residential proxy and custom proxies are supported as fallbacks.",
             "editor": "proxy",
             "default": {
                 "useApifyProxy": true,
-                "apifyProxyGroups": ["RESIDENTIAL"]
+                "apifyProxyGroups": ["UNBLOCKER"]
             }
         }
     },

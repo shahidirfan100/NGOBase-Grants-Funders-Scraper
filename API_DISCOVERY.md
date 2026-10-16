@@ -45,17 +45,17 @@ The Actor does not request agency detail pages. The detail HTML adds limited ext
 
 ## Request and session behavior
 
-- The Actor uses `impit` for the fast direct-request path and does not start Chrome during normal runs.
-- `impit` profiles verified against the live target on 2026-10-13: `chrome` and `firefox` both returned HTTP 200 with agency rows, so `chrome` is the primary profile and `firefox` is the first rotation fallback.
-- If a direct listing or filter request receives a confirmed access challenge, the Actor recovers in bounded steps instead of failing immediately:
-  1. rotate to the next `impit` profile (`chrome` to `firefox`);
-  2. rotate to a fresh Apify Proxy session;
-  3. escalate to socialized Apify Proxy `RESIDENTIAL` sessions when the configured sessions stay blocked;
-  4. start Patchright real Chrome, warm up on `https://ngobase.org/funding-agencies`, and continue with the browser.
-- Cookies collected by `impit` are transferred into the fallback browser context, and browser cookies are handed back to subsequent requests.
-- Filter resolution keeps the CSRF token, referer, and shared cookie jar together.
-- Apify Proxy can be supplied through `proxyConfiguration`. The default uses residential Apify Proxy because the browser challenge rejected datacenter proxy egress with HTTP 403 during the failing QA run; the Actor still rotates sessions and can fall back to residential if a user selects another group.
-- Apify proxy session IDs accept only `[A-Za-z0-9._~]` characters, so rotation uses `ngobase_<pid>_<timestamp>_<n>` (hyphens are rejected by `ProxyConfiguration.newUrl`).
+- On 2026-10-16 the target stopped serving content to direct HTTP: every path (`/`, `/funding-agencies`, `/robots.txt`, `/sitemap.xml`) now returns HTTP 403 with a Cloudflare **managed** challenge (`Cf-Mitigated: challenge`, `Server: cloudflare`, `cType: 'managed'`). The challenge is cleared only by a real browser or by Apify's Unblocker proxy.
+- **Primary client: Patchright real Chrome (stealth).** The Actor keeps one persistent browser session for the whole run (`channel: 'chrome'`, `headless: false`, `noViewport: true`). This clears the Cloudflare managed challenge and, because the context retains every cookie, keeps the Laravel session and CSRF token consistent across the multi-request filter flow.
+- **Why the browser is primary:** running the filter flow (bootstrap `GET` → `getStatesInSelectFilter` `POST` → `agency_filter_redirect` `POST`) through direct HTTP failed with **HTTP 419** (Laravel CSRF/session mismatch). Apify Unblocker has no sticky session, so each request exits a different IP; direct requests could not keep the session and CSRF token bound together. A single browser context does.
+- **Proxy:** the Actor runs through Apify's **UNBLOCKER** proxy by default. Unblocker clears the Cloudflare managed challenge at the proxy level, relaxes TLS verification only for that MITM route (`ignoreTlsErrors` / `ignoreHTTPSErrors`), and is given a longer request budget (120s) because challenge solving is slow. `RESIDENTIAL`, custom proxy groups, and a direct session are supported and used as fallbacks when Unblocker is unavailable.
+- **Verified constraint (2026-10-16):** a Cloudflare-solving proxy is *required* for this target. Direct HTTP, the Patchright stealth browser, and the account's datacenter proxy groups all received the managed challenge and were never issued `cf_clearance` (`navigator.webdriver` was already `false`, so the block is IP/edge-level, not a browser-fingerprint leak). Only Apify Unblocker returned HTTP 200 with agency rows.
+- **Proxy default:** `input_schema.json` sets `apifyProxyGroups: ["UNBLOCKER"]` as the `proxyConfiguration` default. An account must have Unblocker allocation for runs to start; without it, Apify rejects the input at validation (`You currently do not have access to proxy groups: UNBLOCKER`). Residential and custom proxy groups are supported as user overrides and the Actor still escalates to Unblocker at runtime when the selected proxy cannot clear the challenge.
+- **Fallback client: `impit` direct HTTP.** If the browser cannot start (for example a display-less local run), the Actor falls back to `impit` with a bounded ladder. `impit` profiles are valid for impit 0.14.x (`chrome`, `chrome131`, `chrome136`, `firefox`, `firefox133`, `firefox144`, `chrome142`, `ios18`, plus `okhttp*` and older `chrome1xx` variants).
+- Recovery is bounded and evidence-based. In browser mode it restarts the Patchright session on a fresh proxy route. In the direct-request fallback it rotates the proxy route, then the `impit` profile, then escalates to the browser.
+- Cookies collected by `impit` are transferred into the browser context, and browser cookies are handed back to subsequent requests.
+- Filter resolution keeps the CSRF token, referer, and browser session together.
+- Apify proxy session IDs accept only `[A-Za-z0-9._~]` characters, so residential rotation uses `ngobase_<pid>_<timestamp>_<n>` (hyphens are rejected by `ProxyConfiguration.newUrl`).
 - The Actor retries temporary network errors and HTTP 429 or 5xx responses with bounded delays.
 - No authorization token, API key, or cookie value is hardcoded in the Actor.
 
